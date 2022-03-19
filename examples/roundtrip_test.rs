@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 
 use zeldaevent::zevfile::{parse_zev, write_zev};
 

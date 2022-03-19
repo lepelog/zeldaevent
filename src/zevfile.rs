@@ -1,5 +1,6 @@
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 use std::cmp::Ordering;
+use std::fmt::Write as _;
 use std::io::{Cursor, Read, Write};
 
 use crate::raw::{RawActor, RawDataDef, RawEvent, RawHeader, RawStep1, RawStep2};
@@ -13,7 +14,7 @@ const DATA_DEF_SIZE: usize = 0xC;
 const INT_SIZE: usize = 4;
 const FLOAT_SIZE: usize = 4;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Event {
     name: String,
     pub unk1: u8,
@@ -22,7 +23,7 @@ pub struct Event {
     wait_fors: Vec<WaitFor>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Actor {
     name: String,
     pub unk1: u16,
@@ -31,31 +32,31 @@ pub struct Actor {
     steps: Vec<Step>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Step {
     // part1
     long_name: String,
     // wait_for
-    actor_index: u16,
-    unk1: u16,
+    // actor_index: u16,
+    pub unk1: u16,
     // dummy0
     // thisindex
     // dummy1
     // part2
     name: String,
-    unk2: u16,
+    pub unk2: u16,
     // thisindex
-    data: Vec<StepData>,
+    pub data: Vec<StepData>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StepData {
     name: String,
-    unk1: u16,
-    values: StepDataValues,
+    pub unk1: u16,
+    pub values: StepDataValues,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StepDataValues {
     Ints(Vec<u32>),
     Floats(Vec<f32>),
@@ -85,22 +86,35 @@ impl From<std::io::Error> for ZevWriteError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum MutationError {
     StringNotAscii,
     StringTooLong,
+    StringSizeWrong,
+    OutOfRange,
+    AlreadyExists,
 }
 
-#[derive(Debug)]
-struct WaitFor {
+#[derive(Debug, Clone)]
+pub struct WaitFor {
     waiting: StepRef,
     waiting_on: StepRef,
 }
 
-#[derive(Debug)]
-struct StepRef {
+#[derive(Debug, Clone)]
+pub struct StepRef {
     actor_idx: u16,
     step_idx: u16,
+}
+
+fn check_name_length(name: &String, max: usize) -> Result<(), MutationError> {
+    if !name.as_bytes().is_ascii() {
+        return Err(MutationError::StringNotAscii);
+    }
+    if name.as_bytes().len() > max {
+        return Err(MutationError::StringTooLong);
+    }
+    return Ok(());
 }
 
 impl Event {
@@ -109,18 +123,224 @@ impl Event {
     }
 
     pub fn set_name(&mut self, name: String) -> Result<(), MutationError> {
-        if !name.as_bytes().is_ascii() {
-            return Err(MutationError::StringNotAscii);
-        }
-        if name.as_bytes().len() > 32 {
-            return Err(MutationError::StringTooLong);
-        }
+        check_name_length(&name, 32)?;
         self.name = name;
         Ok(())
     }
 
+    pub fn get_unk1(&self) -> u8 {
+        self.unk1
+    }
+
+    pub fn set_unk1(&mut self, unk1: u8) {
+        self.unk1 = unk1;
+    }
+
     pub fn get_actors(&self) -> &Vec<Actor> {
         &self.actors
+    }
+
+    pub fn get_waits(&self) -> &Vec<WaitFor> {
+        &self.wait_fors
+    }
+
+    pub fn remove_all_waits(&mut self) {
+        self.wait_fors.clear();
+    }
+
+    pub fn remove_waiting(&mut self, actoridx: usize, stepidx: usize) {
+        self.wait_fors.retain(|w| {
+            !(w.waiting.actor_idx as usize == actoridx && w.waiting.step_idx as usize == stepidx)
+        });
+    }
+
+    // returns (actor, step), if any, that the specified step waits on
+    pub fn get_waited_on(&self, actoridx: u16, stepidx: u16) -> Option<(u16, u16)> {
+        self.wait_fors
+            .iter()
+            .find(|&wf| wf.waiting.actor_idx == actoridx && wf.waiting.step_idx == stepidx)
+            .map(|wf| (wf.waiting_on.actor_idx, wf.waiting_on.step_idx))
+    }
+
+    // return an iterator over all (actor, step) that wait on the specified step
+    pub fn get_waiting<'a>(
+        &'a self,
+        actoridx: usize,
+        stepidx: usize,
+    ) -> impl Iterator<Item = (usize, usize)> + 'a {
+        self.wait_fors
+            .iter()
+            .filter(move |&wf| {
+                usize::from(wf.waiting_on.actor_idx) == actoridx
+                    && usize::from(wf.waiting_on.step_idx) == stepidx
+            })
+            .map(|wf| {
+                (
+                    usize::from(wf.waiting_on.actor_idx),
+                    usize::from(wf.waiting_on.step_idx),
+                )
+            })
+    }
+
+    pub fn add_wait(
+        &mut self,
+        waiting_actoridx: usize,
+        waiting_stepidx: usize,
+        waited_on_actoridx: usize,
+        waited_on_stepidx: usize,
+    ) -> Result<(), MutationError> {
+        self.remove_waiting(waiting_actoridx, waiting_stepidx);
+
+        // check actor and step exists
+        if !self
+            .actors
+            .get(waiting_actoridx)
+            .map(|a| a.steps.get(waiting_stepidx).is_some())
+            .unwrap_or(false)
+        {
+            return Err(MutationError::OutOfRange);
+        }
+        if !self
+            .actors
+            .get(waited_on_actoridx)
+            .map(|a| a.steps.get(waited_on_stepidx).is_some())
+            .unwrap_or(false)
+        {
+            return Err(MutationError::OutOfRange);
+        }
+
+        self.wait_fors.push(WaitFor {
+            waiting: StepRef {
+                actor_idx: waiting_actoridx as u16,
+                step_idx: waiting_stepidx as u16,
+            },
+            waiting_on: StepRef {
+                actor_idx: waited_on_actoridx as u16,
+                step_idx: waited_on_stepidx as u16,
+            },
+        });
+
+        Ok(())
+    }
+
+    pub fn get_actoridx_for_name(&self, name: &str) -> Option<usize> {
+        self.actors.iter().position(|a| a.name == name)
+    }
+
+    // TODO: proper error handling, false is error
+    pub fn add_step(
+        &mut self,
+        actoridx: usize,
+        stepidx: usize,
+        step: Step,
+    ) -> Result<(), MutationError> {
+        if let Some(actor) = self.actors.get_mut(actoridx) {
+            if stepidx > actor.steps.len() {
+                return Err(MutationError::OutOfRange);
+            }
+            // fix wait_for
+            for WaitFor {
+                waiting,
+                waiting_on,
+            } in self.wait_fors.iter_mut()
+            {
+                if waiting.actor_idx as usize == actoridx {
+                    if waiting.step_idx as usize >= stepidx {
+                        waiting.step_idx += 1;
+                    }
+                }
+                if waiting_on.actor_idx as usize == actoridx {
+                    if waiting_on.step_idx as usize >= stepidx {
+                        waiting_on.step_idx += 1;
+                    }
+                }
+            }
+            // do insert, preserve order
+            actor.steps.insert(stepidx, step);
+            return Ok(());
+        } else {
+            return Err(MutationError::OutOfRange);
+        }
+    }
+
+    pub fn remove_step(&mut self, actoridx: usize, stepidx: usize) -> Result<Step, MutationError> {
+        if let Some(actor) = self.actors.get_mut(actoridx) {
+            if stepidx >= actor.steps.len() {
+                return Err(MutationError::OutOfRange);
+            }
+            // fix wait_for
+            let mut idx = 0;
+            while idx < self.wait_fors.len() {
+                let WaitFor {
+                    waiting,
+                    waiting_on,
+                } = self.wait_fors.get_mut(idx).unwrap();
+                if waiting.actor_idx as usize == actoridx {
+                    if waiting.step_idx as usize == stepidx {
+                        // remove this wait_for
+                        self.wait_fors.swap_remove(idx);
+                        continue;
+                    } else if waiting.step_idx as usize > stepidx {
+                        waiting.step_idx -= 1;
+                    }
+                }
+                if waiting_on.actor_idx as usize == actoridx {
+                    if waiting_on.step_idx as usize == stepidx {
+                        // remove this wait_for
+                        self.wait_fors.swap_remove(idx);
+                        continue;
+                    } else if waiting_on.step_idx as usize > stepidx {
+                        waiting_on.step_idx -= 1;
+                    }
+                }
+                idx += 1;
+            }
+            // do remove, preserve order
+            return Ok(actor.steps.remove(stepidx));
+        } else {
+            return Err(MutationError::OutOfRange);
+        }
+    }
+
+    pub fn to_dot_file(&self) -> String {
+        let mut out = String::new();
+        writeln!(out, "digraph {{\nlabel=\"{}\"", self.name).unwrap();
+        for (actoridx, actor) in self.actors.iter().enumerate() {
+            writeln!(out, "subgraph cluster_{} {{", actoridx).unwrap();
+            writeln!(out, "label=\"{}. {}\"", actoridx, actor.name).unwrap();
+            for (stepidx, step) in actor.steps.iter().enumerate() {
+                writeln!(
+                    out,
+                    "action_{}_{} [label=\"{}. {}\"]",
+                    actoridx, stepidx, stepidx, step.long_name
+                )
+                .unwrap();
+                if stepidx > 0 {
+                    writeln!(
+                        out,
+                        "action_{actoridx}_{prevstep} -> action_{actoridx}_{thisstep}",
+                        actoridx = actoridx,
+                        prevstep = stepidx - 1,
+                        thisstep = stepidx
+                    )
+                    .unwrap();
+                }
+            }
+            writeln!(out, "}}").unwrap();
+        }
+        for WaitFor {
+            waiting,
+            waiting_on,
+        } in self.wait_fors.iter()
+        {
+            writeln!(out, "action_{waited_on_actoridx}_{waited_on_stepidx} -> action_{waiting_actoridx}_{waiting_stepidx}",
+                waited_on_actoridx=waiting_on.actor_idx,
+                waiting_actoridx=waiting.actor_idx,
+                waited_on_stepidx=waiting_on.step_idx,
+                waiting_stepidx=waiting.step_idx).unwrap();
+        }
+        writeln!(out, "}}").unwrap();
+        out
     }
 }
 
@@ -130,11 +350,70 @@ impl Actor {
     }
 
     pub fn set_name(&mut self, name: String) -> Result<(), MutationError> {
+        check_name_length(&name, 32)?;
+        self.name = name;
+        Ok(())
+    }
+
+    pub fn get_unk1(&self) -> u16 {
+        self.unk1
+    }
+
+    pub fn set_unk1(&mut self, unk1: u16) {
+        self.unk1 = unk1;
+    }
+
+    pub fn get_unk2(&self) -> u16 {
+        self.unk2
+    }
+
+    pub fn set_unk2(&mut self, unk2: u16) {
+        self.unk2 = unk2;
+    }
+
+    pub fn get_steps(&self) -> &Vec<Step> {
+        &self.steps
+    }
+}
+
+impl Step {
+    pub fn get_longname(&self) -> &String {
+        &self.long_name
+    }
+
+    pub fn set_longname(&mut self, name: String) -> Result<(), MutationError> {
+        check_name_length(&name, 16)?;
+        self.name = name;
+        Ok(())
+    }
+
+    pub fn get_name(&self) -> &String {
+        &self.name
+    }
+
+    pub fn set_name(&mut self, name: String) -> Result<(), MutationError> {
         if !name.as_bytes().is_ascii() {
             return Err(MutationError::StringNotAscii);
         }
-        if name.as_bytes().len() > 32 {
-            return Err(MutationError::StringTooLong);
+        if name.as_bytes().len() != 4 {
+            return Err(MutationError::StringSizeWrong);
+        }
+        self.name = name;
+        Ok(())
+    }
+}
+
+impl StepData {
+    pub fn get_name(&self) -> &String {
+        &self.name
+    }
+
+    pub fn set_name(&mut self, name: String) -> Result<(), MutationError> {
+        if !name.as_bytes().is_ascii() {
+            return Err(MutationError::StringNotAscii);
+        }
+        if name.as_bytes().len() != 4 {
+            return Err(MutationError::StringSizeWrong);
         }
         self.name = name;
         Ok(())
@@ -324,7 +603,6 @@ pub fn parse_zev(bytes: &[u8]) -> Result<Vec<Event>, ZevParseError> {
                 steps.push(Step {
                     long_name: step1.name,
                     name: step2.name,
-                    actor_index: step1.actorindex,
                     unk1: step1.unk3,
                     unk2: step2.unk1,
                     data: stepdatas,
