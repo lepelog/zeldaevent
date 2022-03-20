@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::io::{Cursor, Read, Write};
 
 use crate::raw::{RawActor, RawDataDef, RawEvent, RawHeader, RawStep1, RawStep2};
+use serde::{Deserialize, Serialize};
 
 const MAGIC: u16 = 0x775A; // "wZ"
 const EV: u16 = 0x4576; // "Ev"
@@ -14,49 +15,47 @@ const DATA_DEF_SIZE: usize = 0xC;
 const INT_SIZE: usize = 4;
 const FLOAT_SIZE: usize = 4;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Event {
-    name: String,
+    pub name: String,
     pub unk1: u8,
 
-    actors: Vec<Actor>,
-    wait_fors: Vec<WaitFor>,
+    pub actors: Vec<Actor>,
+    pub wait_fors: Vec<WaitFor>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Actor {
-    name: String,
+    pub name: String,
     pub unk1: u16,
     pub unk2: u16,
 
-    steps: Vec<Step>,
+    pub steps: Vec<Step>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Step {
     // part1
-    long_name: String,
-    // wait_for
-    // actor_index: u16,
+    pub long_name: String,
     pub unk1: u16,
-    // dummy0
-    // thisindex
-    // dummy1
-    // part2
-    name: String,
+    pub name: String,
     pub unk2: u16,
     // thisindex
     pub data: Vec<StepData>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepData {
-    name: String,
+    pub name: String,
     pub unk1: u16,
     pub values: StepDataValues,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", content = "c")]
+#[serde(rename_all = "camelCase")]
 pub enum StepDataValues {
     Ints(Vec<u32>),
     Floats(Vec<f32>),
@@ -95,16 +94,18 @@ pub enum MutationError {
     AlreadyExists,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WaitFor {
-    waiting: StepRef,
-    waiting_on: StepRef,
+    pub waiting: StepRef,
+    pub waiting_on: StepRef,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StepRef {
-    actor_idx: u16,
-    step_idx: u16,
+    pub actor_idx: u16,
+    pub step_idx: u16,
 }
 
 fn check_name_length(name: &String, max: usize) -> Result<(), MutationError> {
@@ -342,6 +343,10 @@ impl Event {
         writeln!(out, "}}").unwrap();
         out
     }
+
+    pub fn to_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string_pretty(self)
+    }
 }
 
 impl Actor {
@@ -571,7 +576,6 @@ pub fn parse_zev(bytes: &[u8]) -> Result<Vec<Event>, ZevParseError> {
                 // basically checking if waitfor is positive, but converting to a
                 // positive only number at the same time
                 if let Ok(wait_for) = u16::try_from(step1.waitfor) {
-                    // TODO: wait for
                     let waiting_actor_idx = actoridx as u16 - raw_event.actorindex;
                     let waiting_step_idx = stepidx as u16 - raw_actor.stepindex;
 
